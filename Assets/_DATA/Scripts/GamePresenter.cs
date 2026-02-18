@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using JM.Animations;
 using JM.Config;
 using JM.DragDrop;
@@ -17,7 +18,7 @@ namespace JM.Game
         private readonly TowerDropZone _towerZone;
         private readonly HoleDropZone _holeZone;
         private readonly ICubeAnimationHandler _animations;
-        private readonly  IGameStateSaver _gameStateSaver;
+        private readonly IGameStateSaver _gameStateSaver;
 
         public GamePresenter(
             IGameConfigProvider configProvider,
@@ -31,8 +32,8 @@ namespace JM.Game
             _messagePresenter = messagePresenter;
             _towerZone = towerZone;
             _holeZone = holeZone;
-            _gameStateSaver = gameStateSaver;
             _animations = animations;
+            _gameStateSaver = gameStateSaver;
         }
 
         public void BindCube(CubeDragHandler drag)
@@ -40,7 +41,7 @@ namespace JM.Game
             drag.OnDropped += HandleDrop;
             drag.OnBeginDragged += HandleBeginDrag;
         }
-        
+
         private bool ValidateTowerRules(CubeView view)
         {
             foreach (var rule in _gameRules)
@@ -55,30 +56,73 @@ namespace JM.Game
             return true;
         }
 
-
-        private void HandleBeginDrag(CubeView view)
+        private async void HandleBeginDrag(CubeView view)
         {
             _messagePresenter.Show("drag_start");
-            if (_towerZone.ContainsCube(view))
+
+            if (!_towerZone.ContainsCube(view))
+                return;
+
+            List<CubeView> onTopCubes = _towerZone.GetCubesOnTopOf(view);
+            _towerZone.RemoveCube(view);
+            
+            foreach (var cube in onTopCubes)
+                _towerZone.RemoveCube(cube);
+
+            CubeView currentBase = _towerZone.GetTopCube();
+
+            foreach (CubeView fallingCube in onTopCubes)
             {
-                List<CubeView> onTopCubes = _towerZone.GetCubesOnTopOf(view);
-                foreach (CubeView onTopCube in onTopCubes)
-                {
-                    RectTransform rect = onTopCube.RectTransform;
-                    Vector3 pos = rect.localPosition -
-                                  new Vector3(0, rect.rect.height, 0);
-                    
-                    DropTowerCubes(onTopCube, pos);
-                }
+                Vector3 targetPos = CalculateTargetPosition(currentBase, fallingCube);
 
-                _towerZone.RemoveCube(view);
+                bool survived = await DropTowerCubeValidated(
+                    fallingCube,
+                    targetPos,
+                    currentBase);
+
+                if (!survived)
+                    continue;
+
+                currentBase = fallingCube;
             }
+
+            _gameStateSaver.Save();
         }
 
-        private async void DropTowerCubes(CubeView view, Vector3 position)
+        private Vector3 CalculateTargetPosition(CubeView baseCube, CubeView cube)
         {
-            await _animations.FallAsync(view, position);
+            if (baseCube == null)
+                return _towerZone.GetBottomPosition(cube);
+
+            RectTransform baseRect = baseCube.RectTransform;
+            RectTransform cubeRect = cube.RectTransform;
+
+            float targetY = baseRect.localPosition.y + baseRect.rect.height;
+
+            return new Vector3(
+                cubeRect.localPosition.x,
+                targetY,
+                0f);
         }
+
+        private async Task<bool> DropTowerCubeValidated(
+            CubeView cube,
+            Vector3 targetPos,
+            CubeView baseCube)
+        {
+            if (baseCube != null && !IsWithinTolerance(baseCube, cube))
+            {
+                await _animations.FallAndExplodeAsync(cube, targetPos);
+                _animations.Reset(cube);
+                return false;
+            }
+
+            await _animations.FallAsync(cube, targetPos);
+            _towerZone.AddCubeOnTop(cube);
+
+            return true;
+        }
+        
 
         private void HandleDrop(CubeView view, Vector2 position)
         {
@@ -93,6 +137,7 @@ namespace JM.Game
                 HandleHoleDrop(view);
                 return;
             }
+
             DropWithoutAnyEntrance(view);
         }
 
@@ -106,6 +151,7 @@ namespace JM.Game
         private async void HandleHoleDrop(CubeView view)
         {
             Vector2 holePos = _holeZone.GetBottomPosition(view);
+
             if (_holeZone.CrossHole(view, out holePos))
             {
                 _messagePresenter.Show("hole_entered");
@@ -147,7 +193,6 @@ namespace JM.Game
 
             RectTransform topRect = topCube.RectTransform;
             RectTransform viewRect = view.RectTransform;
-            
 
             float requiredMinY =
                 topRect.localPosition.y + topRect.rect.height * 0.5f;
@@ -164,13 +209,7 @@ namespace JM.Game
                 return;
             }
 
-            float halfWidth = topRect.rect.width * 0.5f;
-            float tolerance = halfWidth; 
-
-            float distanceX = Mathf.Abs(
-                viewRect.localPosition.x - topRect.localPosition.x);
-
-            if (distanceX > tolerance)
+            if (!IsWithinTolerance(topCube, view))
             {
                 _messagePresenter.Show("cube_missed");
                 await _animations.FallAndExplodeAsync(view, basePos);
@@ -183,18 +222,37 @@ namespace JM.Game
                 topRect.localPosition.y + topRect.rect.height;
 
             Vector3 targetPos = new Vector3(
-                viewRect.localPosition.x, 
+                viewRect.localPosition.x,
                 targetY,
                 0f);
 
             _towerZone.AddCubeOnTop(view);
             _messagePresenter.Show("cube_placed");
+
             await _animations.FallAsync(view, targetPos);
             await _animations.JumpAsync(view);
-            _gameStateSaver.Save();
 
+            _gameStateSaver.Save();
+        }
+        
+
+        private float CalculateTolerance(CubeView baseCube)
+        {
+            RectTransform baseRect = baseCube.RectTransform;
+            return baseRect.rect.width * 0.5f;
         }
 
+        private bool IsWithinTolerance(CubeView baseCube, CubeView cube)
+        {
+            RectTransform baseRect = baseCube.RectTransform;
+            RectTransform cubeRect = cube.RectTransform;
 
+            float tolerance = CalculateTolerance(baseCube);
+
+            float distanceX = Mathf.Abs(
+                cubeRect.localPosition.x - baseRect.localPosition.x);
+
+            return distanceX <= tolerance;
+        }
     }
 }
