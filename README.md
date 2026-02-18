@@ -1,2 +1,2 @@
 # JM
-Just Moby casual game
+Just Moby casual game. MVP-Lite architecture.
